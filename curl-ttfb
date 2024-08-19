@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+import subprocess
+import statistics
+import argparse
+from urllib.parse import urlparse
+import re
+import random
+import string
+
+def generate_random_chars(length=8):
+    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
+
+def make_curl_request(url, use_dns_override):
+    hostname = urlparse(url).hostname
+    port = urlparse(url).port or ('443' if url.startswith('https') else '80')
+    random_chars = generate_random_chars()
+    if '?' in url:
+        url += f'&defeatcache={random_chars}'
+    else:
+        url += f'?defeatcache={random_chars}'
+    
+    command = [
+        'curl',
+        '-k',
+        '-i',
+        '-w', '\\n%{http_code} %{time_starttransfer}',  # Output HTTP status code and TTFB
+        '-s',  # Silent mode
+    ]
+    
+    if use_dns_override:
+        resolve_param = f"{hostname}:{port}:127.0.0.1"
+        command.extend(['--resolve', resolve_param])  # DNS resolution override
+    
+    command.append(url)
+    
+    result = subprocess.run(command, capture_output=True, text=True)
+    
+    if result.returncode == 0:
+        headers_body, http_code_ttfb = result.stdout.rsplit('\n', 1)
+        http_code, ttfb = http_code_ttfb.split()
+        http_code = int(http_code)
+        ttfb = float(ttfb.strip())
+        if http_code != 200:
+            print(f"Warning: Received non-200 HTTP status code: {http_code}")
+            return None
+        if re.search("fatal error", headers_body, re.IGNORECASE):
+            print("Warning: 'Fatal Error' found in the response body or headers.")
+            return None
+        return ttfb
+    else:
+        print(f"Error: Command failed with return code {result.returncode}")
+        print(f"Stdout: {result.stdout}")
+        print(f"Stderr: {result.stderr}")
+        return None
+
+def measure_ttfb(url, num_requests, use_dns_override):
+    ttfbs = []
+    for i in range(num_requests):
+        print(f"Making request {i + 1} of {num_requests}", end='\r')
+        ttfb = make_curl_request(url, use_dns_override)
+        if ttfb is not None:
+            ttfbs.append(ttfb)
+    
+    if ttfbs:
+        ttfbs.sort()
+        min_ttfb = min(ttfbs)
+        max_ttfb = max(ttfbs)
+        avg_ttfb = sum(ttfbs) / len(ttfbs)
+        stddev_ttfb = statistics.stdev(ttfbs)
+        percentiles = {
+            'p50': ttfbs[int(len(ttfbs) * 0.50)],
+            'p75': ttfbs[int(len(ttfbs) * 0.75)],
+            'p90': ttfbs[int(len(ttfbs) * 0.90)],
+            'p95': ttfbs[int(len(ttfbs) * 0.95)],
+            'p99': ttfbs[int(len(ttfbs) * 0.99)]
+        }
+        
+        print("\n\n*** TTFB of {0} requests, in seconds ***\n".format(num_requests))
+        print(f"DNS Override: {'Enabled' if use_dns_override else 'Disabled'}")
+        print(f"min = {min_ttfb:.4f}")
+        print(f"avg = {avg_ttfb:.4f}")
+        print(f"max = {max_ttfb:.4f}")
+        print(f"stddev = {stddev_ttfb:.4f}")
+        print("")
+        for key, value in percentiles.items():
+            print(f"{key} = {value:.4f}")
+        
+        # Bucketing
+        print("\n*** Buckets ***\n")
+        delta = 0.1
+        bucket_counts = {}
+        for ttfb in ttfbs:
+            bucket = int(ttfb / delta) * delta
+            bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+        for bucket in sorted(bucket_counts):
+            print(f"| {bucket:.1f} -> {bucket + delta:.1f} = {bucket_counts[bucket]}")
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="Measure Time to First Byte (TTFB) using curl with optional DNS overrides.")
+    parser.add_argument('url', type=str, help="URL to request")
+    parser.add_argument('num_requests', type=int, help="Number of requests to send")
+    parser.add_argument('--disable-dns-override', action='store_true', help="Disable automatic DNS override")
+    args = parser.parse_args()
+    return args.url, args.num_requests, not args.disable_dns_override
+
+def main():
+    url, num_requests, use_dns_override = parse_arguments()
+    measure_ttfb(url, num_requests, use_dns_override)
+
+if __name__ == "__main__":
+    main()
