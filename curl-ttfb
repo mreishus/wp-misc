@@ -11,7 +11,7 @@ import json
 def generate_random_chars(length=8):
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
 
-def make_curl_request(url, use_dns_override):
+def make_curl_request(url, use_dns_override, mode='ttfb'):
     hostname = urlparse(url).hostname
     port = urlparse(url).port or ('443' if url.startswith('https') else '80')
     random_chars = generate_random_chars()
@@ -25,7 +25,7 @@ def make_curl_request(url, use_dns_override):
         '-k',
         '--ipv4',
         '-i',
-        '-w', '\\n%{http_code} %{time_starttransfer}',  # Output HTTP status code and TTFB
+        '-w', '\\n%{http_code} %{time_starttransfer} %{time_total}',  # Output HTTP status code, TTFB and time_total
         '-s',  # Silent mode
     ]
 
@@ -38,27 +38,29 @@ def make_curl_request(url, use_dns_override):
     result = subprocess.run(command, capture_output=True, text=True)
     
     if result.returncode == 0:
-        headers_body, http_code_ttfb = result.stdout.rsplit('\n', 1)
-        http_code, ttfb = http_code_ttfb.split()
+        headers_body, metrics = result.stdout.rsplit('\n', 1)
+        http_code, time_starttransfer, time_total = metrics.split()
         http_code = int(http_code)
-        ttfb = float(ttfb.strip()) * 1000  # Convert to milliseconds
+        time_starttransfer = float(time_starttransfer.strip()) * 1000  # Convert to milliseconds
+        time_total = float(time_total.strip()) * 1000  # Convert to milliseconds
         if http_code != 200:
             print(f"Warning: Received non-200 HTTP status code: {http_code}")
             return None
         if re.search("fatal error", headers_body, re.IGNORECASE):
             print("Warning: 'Fatal Error' found in the response body or headers.")
             return None
-        return ttfb
+        return time_total if mode == 'ttlb' else time_starttransfer
     else:
         print(f"Error: Command failed with return code {result.returncode}")
         print(f"Stdout: {result.stdout}")
         print(f"Stderr: {result.stderr}")
         return None
 
-def measure_ttfb(url, num_requests, use_dns_override, output_format='text'):
-    ttfbs = []
+def measure_ttfb(url, num_requests, use_dns_override, output_format='text', mode='ttfb'):
+    times = []
     data = {
         'url': url,
+        'mode': mode,
         'metrics': {},
         'requests': [],
         'buckets': {}
@@ -67,39 +69,40 @@ def measure_ttfb(url, num_requests, use_dns_override, output_format='text'):
     for i in range(num_requests):
         if output_format == 'text':
             print(f"Making request {i + 1} of {num_requests}", end='\r')
-        ttfb = make_curl_request(url, use_dns_override)
-        if ttfb is not None:
-            ttfbs.append(ttfb)
-            data['requests'].append(ttfb)
+        time = make_curl_request(url, use_dns_override, mode)
+        if time is not None:
+            times.append(time)
+            data['requests'].append(time)
     
-    if ttfbs:
-        ttfbs.sort()
+    if times:
+        times.sort()
         data['metrics'] = {
-            'min': min(ttfbs),
-            'max': max(ttfbs),
-            'avg': sum(ttfbs) / len(ttfbs),
-            'stddev': statistics.stdev(ttfbs),
-            'p50': ttfbs[int(len(ttfbs) * 0.50)],
-            'p75': ttfbs[int(len(ttfbs) * 0.75)],
-            'p90': ttfbs[int(len(ttfbs) * 0.90)],
-            'p95': ttfbs[int(len(ttfbs) * 0.95)],
-            'p99': ttfbs[int(len(ttfbs) * 0.99)]
+            'min': min(times),
+            'max': max(times),
+            'avg': sum(times) / len(times),
+            'stddev': statistics.stdev(times),
+            'p50': times[int(len(times) * 0.50)],
+            'p75': times[int(len(times) * 0.75)],
+            'p90': times[int(len(times) * 0.90)],
+            'p95': times[int(len(times) * 0.95)],
+            'p99': times[int(len(times) * 0.99)]
         }
         
         # Bucketing
         delta = 100  # 100ms buckets
-        for ttfb in ttfbs:
+        for ttfb in times:
             bucket = round(int(ttfb / delta) * delta)
             data['buckets'][str(bucket)] = data['buckets'].get(str(bucket), 0) + 1
 
         if output_format == 'json':
             print(json.dumps(data, indent=2))
         else:
-            display_text_output(data, num_requests, use_dns_override)
+            display_text_output(data, num_requests, use_dns_override, mode)
 
-def display_text_output(data, num_requests, use_dns_override):
-    print("\n\n*** TTFB of {0} requests, in milliseconds ***\n".format(num_requests))
+def display_text_output(data, num_requests, use_dns_override, mode):
+    print(f"\n\n*** {'TTLB' if mode == 'ttlb' else 'TTFB'} of {num_requests} requests, in milliseconds ***\n")
     print(f"DNS Override: {'Enabled' if use_dns_override else 'Disabled'}")
+    print(f"Mode: {'Time to Last Byte' if mode == 'ttlb' else 'Time to First Byte'}")
     print(f"min = {data['metrics']['min']:.2f}")
     print(f"avg = {data['metrics']['avg']:.2f}")
     print(f"max = {data['metrics']['max']:.2f}")
@@ -113,17 +116,18 @@ def display_text_output(data, num_requests, use_dns_override):
         print(f"| {float(bucket):.0f} -> {float(bucket) + 100:.0f} = {count}")
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(description="Measure Time to First Byte (TTFB) using curl with optional DNS overrides.")
+    parser = argparse.ArgumentParser(description="Measure Time to First Byte (TTFB) or Time to Last Byte (TTLB) using curl with optional DNS overrides.")
     parser.add_argument('url', type=str, help="URL to request")
     parser.add_argument('num_requests', type=int, help="Number of requests to send")
     parser.add_argument('--disable-dns-override', action='store_true', help="Disable automatic DNS override")
     parser.add_argument('-f', '--format', choices=['text', 'json'], default='text', help="Output format (text or json)")
+    parser.add_argument('-m', '--mode', choices=['ttfb', 'ttlb'], default='ttfb', help="Measurement mode: Time to First Byte (ttfb) or Time to Last Byte (ttlb)")
     args = parser.parse_args()
-    return args.url, args.num_requests, not args.disable_dns_override, args.format
+    return args.url, args.num_requests, not args.disable_dns_override, args.format, args.mode
 
 def main():
-    url, num_requests, use_dns_override, output_format = parse_arguments()
-    measure_ttfb(url, num_requests, use_dns_override, output_format)
+    url, num_requests, use_dns_override, output_format, mode = parse_arguments()
+    measure_ttfb(url, num_requests, use_dns_override, output_format, mode)
 
 if __name__ == "__main__":
     main()
