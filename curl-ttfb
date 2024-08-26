@@ -22,6 +22,7 @@ def make_curl_request(url, use_dns_override):
     command = [
         'curl',
         '-k',
+        '--ipv4',
         '-i',
         '-w', '\\n%{http_code} %{time_starttransfer}',  # Output HTTP status code and TTFB
         '-s',  # Silent mode
