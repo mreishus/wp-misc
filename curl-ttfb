@@ -41,7 +41,7 @@ def make_curl_request(url, use_dns_override):
         headers_body, http_code_ttfb = result.stdout.rsplit('\n', 1)
         http_code, ttfb = http_code_ttfb.split()
         http_code = int(http_code)
-        ttfb = float(ttfb.strip())
+        ttfb = float(ttfb.strip()) * 1000  # Convert to milliseconds
         if http_code != 200:
             print(f"Warning: Received non-200 HTTP status code: {http_code}")
             return None
@@ -87,9 +87,9 @@ def measure_ttfb(url, num_requests, use_dns_override, output_format='text'):
         }
         
         # Bucketing
-        delta = 0.1
+        delta = 100  # 100ms buckets
         for ttfb in ttfbs:
-            bucket = round(int(ttfb / delta) * delta, 1)
+            bucket = round(int(ttfb / delta) * delta)
             data['buckets'][str(bucket)] = data['buckets'].get(str(bucket), 0) + 1
 
         if output_format == 'json':
@@ -98,19 +98,19 @@ def measure_ttfb(url, num_requests, use_dns_override, output_format='text'):
             display_text_output(data, num_requests, use_dns_override)
 
 def display_text_output(data, num_requests, use_dns_override):
-    print("\n\n*** TTFB of {0} requests, in seconds ***\n".format(num_requests))
+    print("\n\n*** TTFB of {0} requests, in milliseconds ***\n".format(num_requests))
     print(f"DNS Override: {'Enabled' if use_dns_override else 'Disabled'}")
-    print(f"min = {data['metrics']['min']:.4f}")
-    print(f"avg = {data['metrics']['avg']:.4f}")
-    print(f"max = {data['metrics']['max']:.4f}")
-    print(f"stddev = {data['metrics']['stddev']:.4f}")
+    print(f"min = {data['metrics']['min']:.2f}")
+    print(f"avg = {data['metrics']['avg']:.2f}")
+    print(f"max = {data['metrics']['max']:.2f}")
+    print(f"stddev = {data['metrics']['stddev']:.2f}")
     print("")
     for key in ['p50', 'p75', 'p90', 'p95', 'p99']:
-        print(f"{key} = {data['metrics'][key]:.4f}")
+        print(f"{key} = {data['metrics'][key]:.2f}")
 
     print("\n*** Buckets ***\n")
     for bucket, count in sorted(data['buckets'].items(), key=lambda x: float(x[0])):
-        print(f"| {float(bucket):.1f} -> {float(bucket) + 0.1:.1f} = {count}")
+        print(f"| {float(bucket):.0f} -> {float(bucket) + 100:.0f} = {count}")
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Measure Time to First Byte (TTFB) using curl with optional DNS overrides.")
