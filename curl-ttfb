@@ -76,6 +76,7 @@ def measure_ttfb(url, num_requests, use_dns_override, output_format='text', mode
     
     if times:
         times.sort()
+
         data['metrics'] = {
             'min': min(times),
             'max': max(times),
@@ -87,6 +88,17 @@ def measure_ttfb(url, num_requests, use_dns_override, output_format='text', mode
             'p95': times[int(len(times) * 0.95)],
             'p99': times[int(len(times) * 0.99)]
         }
+        # use z-score of 1.96 for 95% confidence interval, if more than 30 samples
+        n = len(times)
+        if n >= 30:
+            data['stderror'] = data['metrics']['stddev'] / (n ** 0.5)
+            margin_of_error = 1.96 * data['stderror']
+            data['confidence_interval_95'] = (
+                data['metrics']['avg'] - margin_of_error,
+                data['metrics']['avg'] + margin_of_error
+            )
+        else:
+            data['confidence_interval_95'] = None
         
         # Bucketing
         delta = 100  # 100ms buckets
@@ -107,6 +119,10 @@ def display_text_output(data, num_requests, use_dns_override, mode):
     print(f"avg = {data['metrics']['avg']:.2f}")
     print(f"max = {data['metrics']['max']:.2f}")
     print(f"stddev = {data['metrics']['stddev']:.2f}")
+    if data['confidence_interval_95']:
+        print(f"95% Confidence Interval: ({data['confidence_interval_95'][0]:.2f}, {data['confidence_interval_95'][1]:.2f})")
+    else:
+        print("95% Confidence Interval: Not calculated (sample size < 30)")
     print("")
     for key in ['p50', 'p75', 'p90', 'p95', 'p99']:
         print(f"{key} = {data['metrics'][key]:.2f}")
