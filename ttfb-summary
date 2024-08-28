@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+import os
+import json
+import datetime
+import traceback
+import argparse
+
+def summarize_json_files( output_format='plain' ):
+    summaries = []
+
+    # Scan current directory for JSON files
+    for filename in os.listdir("."):
+        if filename.endswith(".json"):
+            try:
+                with open(filename, "r") as f:
+                    data = json.load(f)
+
+                # Extract save name and timestamp more flexibly
+                parts = filename.split("_")
+                save_name = "_".join(parts[:-2])  # Everything before the last two parts
+                timestamp = "_".join(parts[-2:]).split(".")[0]  # Last two parts, without file extension
+
+                # Try different timestamp formats
+                for fmt in ("%Y%m%d_%H%M%S", "%Y%m%d%H%M%S", "%H%M%S"):
+                    try:
+                        dt = datetime.datetime.strptime(timestamp, fmt)
+                        if fmt == "%H%M%S":
+                            # If only time is provided, assume current date
+                            dt = datetime.datetime.now().replace(hour=dt.hour, minute=dt.minute, second=dt.second)
+                        break
+                    except ValueError:
+                        continue
+                else:
+                    raise ValueError(f"Unrecognized timestamp format: {timestamp}")
+
+                p50 = data["metrics"]["p50"]
+
+                summaries.append({"save_name": save_name, "timestamp": dt, "p50": p50})
+            except Exception as e:
+                print(f"Error processing {filename}:")
+                print(f"Exception type: {type(e).__name__}")
+                print(f"Exception message: {str(e)}")
+                print("Traceback:")
+                print(traceback.format_exc())
+                print(f"File contents:")
+                with open(filename, "r") as f:
+                    print(f.read())
+                print("-" * 40)
+
+                print(f"Skipping {filename}: not in expected format")
+
+    # Sort summaries by timestamp
+    summaries.sort(key=lambda x: x["timestamp"])
+
+    # Write summary to file and print to screen
+    with open("summary.txt", "w") as f:
+        if output_format == 'gutenberg':
+            header = "<!-- wp:table -->\n<figure class=\"wp-block-table\"><table><thead><tr><th>Save Name</th><th>Timestamp</th><th>p50 (ms)</th></tr></thead><tbody>"
+            footer = "</tbody></table></figure>\n<!-- /wp:table -->"
+            f.write(header)
+            print(header)
+            for summary in summaries:
+                line = f"<tr><td>{summary['save_name']}</td><td>{summary['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}</td><td>{summary['p50']:.2f}</td></tr>"
+                f.write(line)
+                print(line)
+            f.write(footer)
+            print(footer)
+        else:
+            header = "Save Name | Timestamp | p50 (ms)"
+            separator = "-" * 40
+            f.write(f"{header}\n{separator}\n")
+            print(header)
+            print(separator)
+            for summary in summaries:
+                line = f"{summary['save_name']} | {summary['timestamp'].strftime('%Y-%m-%d %H:%M:%S')} | {summary['p50']:.2f}"
+                f.write(f"{line}\n")
+                print(line)
+
+    print("\nSummary written to summary.txt")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Summarize JSON files and output in plain or Gutenberg table format.")
+    parser.add_argument("--gutenberg", action="store_true", help="Output in Gutenberg table format")
+    args = parser.parse_args()
+
+    output_format = 'gutenberg' if args.gutenberg else 'plain'
+    summarize_json_files(output_format)
