@@ -124,3 +124,27 @@ register_shutdown_function(function() {
 	}
 });
 
+$GLOBALS['sandbox_start_time']     ??= microtime( true );
+$GLOBALS['sandbox_last_selt_time'] ??= microtime( true );
+function selt( $message, $do_log = true ) {
+	if ( empty( $message ) ) {
+		$message = 'Mark ' . $GLOBALS['sandbox_selt_num'] . ':';
+		$GLOBALS['sandbox_selt_num'] += 1;
+	}
+	$now  = microtime( true );
+
+	$elap       = round( ( $now - $GLOBALS['sandbox_last_selt_time'] ) * 1000, 2 );
+	$elap_begin = round( ( $now - $GLOBALS['sandbox_start_time'] ) * 1000, 2 );
+
+	if ( $do_log ) {
+		$spaces = str_repeat(' ', $GLOBALS['level'] ?? 0);
+		if ( function_exists('ll') ) {
+			ll($spaces . "$message | $elap | $elap_begin");
+		}
+		if ( function_exists('rr') ) {
+			rr($spaces . "$message | $elap | $elap_begin");
+		}
+	}
+
+	$GLOBALS['sandbox_last_selt_time'] = microtime( true );
+}
