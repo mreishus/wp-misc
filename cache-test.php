@@ -288,6 +288,9 @@ function add_cache_test_menu() {
     add_menu_page( 'Cache Get Test', 'Cache Get Test', 'manage_options', 'cache-get-test', 'run_cache_get_test' );
     add_menu_page( 'Cache Multi-Get Test', 'Cache Multi-Get Test', 'manage_options', 'cache-multi-get-test', 'run_cache_multi_get_test' );
     add_menu_page( 'Theme Cache Test', 'Theme Cache Test', 'manage_options', 'theme-cache-test', 'simplified_theme_cache_test' );
+    add_menu_page('Transient Set Test', 'Transient Set Test', 'manage_options', 'transient-set-test', 'run_transient_set_test');
+    add_menu_page('Transient Get Test', 'Transient Get Test', 'manage_options', 'transient-get-test', 'run_transient_get_test');
+
 }
 add_action( 'admin_menu', 'add_cache_test_menu' );
 
@@ -354,3 +357,109 @@ function simplified_theme_cache_test() {
     echo "</pre>";
 }
 
+function run_transient_set_test() {
+    global $TEST_CASES, $KEY_PREFIX;
+
+    echo "<h2>Transient Set Test Results</h2>";
+
+    $csv_data = "Test Type,Cache Implementation,Size (KB),Iterations,Total Time (ms),Average Time (ms)\n";
+    $csv_data .= "TRANSIENT_SET," . get_cache_implementation() . ",,,,\n";
+
+    foreach ($TEST_CASES as $case) {
+        $size = $case['size'];
+        $iterations = $case['iterations'];
+        $key_prefix = $KEY_PREFIX . "transient_" . $size . "_";
+
+        // Prepare data outside of timing
+        $data_array = [];
+        for ($i = 0; $i < $iterations; $i++) {
+            $data_type = $i % 3; // 0: string, 1: array, 2: object
+            switch ($data_type) {
+                case 0:
+                    $data = generate_random_data($size);
+                    break;
+                case 1:
+                    $data = generate_random_array($size);
+                    break;
+                case 2:
+                    $data = generate_random_object($size);
+                    break;
+            }
+            $data_array[$i] = $data;
+        }
+
+        // Perform timed transient set operations
+        $start_time = microtime(true);
+        for ($i = 0; $i < $iterations; $i++) {
+            $key = $key_prefix . $i;
+            set_transient($key, $data_array[$i], 600);
+        }
+        $set_time = (microtime(true) - $start_time) * 1000;
+
+        echo "<h3>Test with {$size}KB data:</h3>";
+        echo "<p>Time to set {$iterations} transients: " . number_format($set_time, 2) . " ms</p>";
+        echo "<p>Average time per set: " . number_format($set_time / $iterations, 2) . " ms</p>";
+
+        // Add to CSV data
+        $csv_data .= "TRANSIENT_SET," . get_cache_implementation() . ",$size,$iterations," . number_format($set_time, 2) . "," . number_format($set_time / $iterations, 2) . "\n";
+    }
+
+    echo "<p>Transient set complete. Please run the transient get test now.</p>";
+
+    output_csv_data($csv_data);
+}
+
+function run_transient_get_test() {
+    global $TEST_CASES, $KEY_PREFIX;
+
+    echo "<h2>Transient Get Test Results</h2>";
+
+    $csv_data = "Test Type,Cache Implementation,Size (KB),Iterations,Total Time (ms),Average Time (ms),Memory Used (MB),Peak Memory (MB)\n";
+    $csv_data .= "TRANSIENT_GET," . get_cache_implementation() . ",,,,,,\n";
+
+    foreach ($TEST_CASES as $case) {
+        $size = $case['size'];
+        $iterations = $case['iterations'];
+        $key_prefix = $KEY_PREFIX . "transient_" . $size . "_";
+
+        // Record initial memory usage
+        $initial_memory = memory_get_usage(true);
+
+        // Perform timed transient get operations
+        $start_time = microtime(true);
+        $retrieved_data = [];
+        for ($i = 0; $i < $iterations; $i++) {
+            $key = $key_prefix . $i;
+            $retrieved_data[$key] = get_transient($key);
+        }
+        $get_time = (microtime(true) - $start_time) * 1000;
+
+        // Record peak memory usage
+        $peak_memory = memory_get_peak_usage(true);
+
+        // Calculate memory usage
+        $memory_used = $peak_memory - $initial_memory;
+
+        echo "<h3>Test with {$size}KB data:</h3>";
+        echo "<p>Time to get {$iterations} transients: " . number_format($get_time, 2) . " ms</p>";
+        echo "<p>Average time per get: " . number_format($get_time / $iterations, 2) . " ms</p>";
+        echo "<p>Memory used / Peak: " 
+            . number_format($memory_used / 1024 / 1024, 2) . " MB / "
+            . number_format($peak_memory / 1024 / 1024, 2) . " MB "
+            . "</p>";
+
+        // Add to CSV data
+        $csv_data .= "TRANSIENT_GET," . get_cache_implementation() . ",$size,$iterations," . number_format($get_time, 2) . "," . number_format($get_time / $iterations, 2) . ","
+            . number_format($memory_used / 1024 / 1024, 2) . "," . number_format($peak_memory / 1024 / 1024, 2) . "\n";
+
+        // Clean up
+        for ($i = 0; $i < $iterations; $i++) {
+            $key = $key_prefix . $i;
+            delete_transient($key);
+        }
+    }
+
+    echo "<p>Transient get complete.</p>";
+
+    output_csv_data($csv_data);
+}
