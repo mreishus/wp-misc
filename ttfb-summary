@@ -5,7 +5,7 @@ import datetime
 import traceback
 import argparse
 
-def summarize_json_files( output_format='plain' ):
+def summarize_json_files(output_format='plain', include_p75=False, include_requests=False):
     summaries = []
 
     # Scan current directory for JSON files
@@ -26,7 +26,7 @@ def summarize_json_files( output_format='plain' ):
                         dt = datetime.datetime.strptime(timestamp, fmt)
                         if fmt == "%H%M%S":
                             # If only time is provided, assume current date
-                            dt = datetime.datetime.now().replace(hour=dt.hour, minute=dt.minute, second=dt.second)
+                            dt = datetime.datetime.now().replace(hour=dt.hour, minute=dt.minute, second=dt.second, microsecond=0)
                         break
                     except ValueError:
                         continue
@@ -34,8 +34,21 @@ def summarize_json_files( output_format='plain' ):
                     raise ValueError(f"Unrecognized timestamp format: {timestamp}")
 
                 p50 = data["metrics"]["p50"]
+                summary = {"save_name": save_name, "timestamp": dt, "p50": p50}
 
-                summaries.append({"save_name": save_name, "timestamp": dt, "p50": p50})
+                if include_p75:
+                    p75 = data["metrics"].get("p75", None)
+                    if p75 is not None:
+                        summary["p75"] = p75
+                    else:
+                        raise KeyError("p75 metric not found in JSON data")
+
+                if include_requests:
+                    requests = data.get("requests", [])
+                    num_requests = len(requests)
+                    summary["num_requests"] = num_requests
+
+                summaries.append(summary)
             except Exception as e:
                 print(f"Error processing {filename}:")
                 print(f"Exception type: {type(e).__name__}")
@@ -55,24 +68,42 @@ def summarize_json_files( output_format='plain' ):
     # Write summary to file and print to screen
     with open("summary.txt", "w") as f:
         if output_format == 'gutenberg':
-            header = "<!-- wp:table -->\n<figure class=\"wp-block-table\"><table><thead><tr><th>Save Name</th><th>Timestamp</th><th>p50 (ms)</th></tr></thead><tbody>"
+            header = "<!-- wp:table -->\n<figure class=\"wp-block-table\"><table><thead><tr><th>Save Name</th><th>Timestamp</th><th>p50 (ms)</th>"
+            if include_p75:
+                header += "<th>p75 (ms)</th>"
+            if include_requests:
+                header += "<th>Number of Requests</th>"
+            header += "</tr></thead><tbody>"
             footer = "</tbody></table></figure>\n<!-- /wp:table -->"
-            f.write(header)
+            f.write(header + "\n")
             print(header)
             for summary in summaries:
-                line = f"<tr><td>{summary['save_name']}</td><td>{summary['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}</td><td>{summary['p50']:.2f}</td></tr>"
-                f.write(line)
+                line = f"<tr><td>{summary['save_name']}</td><td>{summary['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}</td><td>{summary['p50']:.2f}</td>"
+                if include_p75:
+                    line += f"<td>{summary['p75']:.2f}</td>"
+                if include_requests:
+                    line += f"<td>{summary['num_requests']}</td>"
+                line += "</tr>"
+                f.write(line + "\n")
                 print(line)
             f.write(footer)
             print(footer)
         else:
             header = "Save Name | Timestamp | p50 (ms)"
-            separator = "-" * 40
+            if include_p75:
+                header += " | p75 (ms)"
+            if include_requests:
+                header += " | Number of Requests"
+            separator = "-" * len(header)
             f.write(f"{header}\n{separator}\n")
             print(header)
             print(separator)
             for summary in summaries:
                 line = f"{summary['save_name']} | {summary['timestamp'].strftime('%Y-%m-%d %H:%M:%S')} | {summary['p50']:.2f}"
+                if include_p75:
+                    line += f" | {summary['p75']:.2f}"
+                if include_requests:
+                    line += f" | {summary['num_requests']}"
                 f.write(f"{line}\n")
                 print(line)
 
@@ -82,7 +113,14 @@ def summarize_json_files( output_format='plain' ):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Summarize JSON files and output in plain or Gutenberg table format.")
     parser.add_argument("--gutenberg", action="store_true", help="Output in Gutenberg table format")
+    parser.add_argument("--include-p75", action="store_true", help="Include p75 metric in the summary")
+    parser.add_argument("--include-requests", action="store_true", help="Include number of requests in the summary")
     args = parser.parse_args()
 
     output_format = 'gutenberg' if args.gutenberg else 'plain'
-    summarize_json_files(output_format)
+    summarize_json_files(
+        output_format,
+        include_p75=args.include_p75,
+        include_requests=args.include_requests
+    )
+
