@@ -176,7 +176,11 @@ def save_run_data(condition_id, run_name, data):
 
 
 def summarize_json_files(condition_ids, include_p75=False, include_requests=False, output_format='plain'):
-    summaries = []
+    from collections import defaultdict
+
+    # Group summaries by condition
+    grouped_summaries = defaultdict(list)
+
     for condition_id in condition_ids:
         condition_path = CONDITIONS_DIR / condition_id
         metadata = {}
@@ -201,7 +205,6 @@ def summarize_json_files(condition_ids, include_p75=False, include_requests=Fals
                 timestamp = datetime.datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
 
                 summary = {
-                    "condition": condition_name,
                     "save_name": "_".join(filename_parts[:-2]),
                     "timestamp": timestamp,
                     "p50": data["metrics"].get("p50", 0.0),
@@ -210,7 +213,7 @@ def summarize_json_files(condition_ids, include_p75=False, include_requests=Fals
                     summary["p75"] = data["metrics"].get("p75", 0.0)
                 if include_requests:
                     summary["num_requests"] = len(data["requests"])
-                summaries.append(summary)
+                grouped_summaries[condition_name].append(summary)
             except Exception as e:
                 print(f"Error processing {file}:")
                 print(f"Exception type: {type(e).__name__}")
@@ -226,61 +229,69 @@ def summarize_json_files(condition_ids, include_p75=False, include_requests=Fals
                 print("-" * 40)
                 print(f"Skipping {file}: not in expected format")
 
-    # Sort summaries by timestamp
-    summaries.sort(key=lambda x: x["timestamp"])
+    # Sort summaries within each condition by timestamp
+    for summaries in grouped_summaries.values():
+        summaries.sort(key=lambda x: x["timestamp"])
 
     # Prepare output
     output_lines = []
     if output_format == 'gutenberg':
-        header = (
-            "<!-- wp:table -->\n"
-            "<figure class=\"wp-block-table\"><table><thead><tr>"
-            "<th>Condition</th>"
-            "<th>Save Name</th>"
-            "<th>Timestamp</th>"
-            "<th>p50 (ms)</th>"
-        )
-        if include_p75:
-            header += "<th>p75 (ms)</th>"
-        if include_requests:
-            header += "<th>Number of Requests</th>"
-        header += "</tr></thead><tbody>"
-        footer = "</tbody></table></figure>\n<!-- /wp:table -->"
-        output_lines.append(header)
-        for summary in summaries:
-            line = (
-                f"<tr><td>{summary['condition']}</td>"
-                f"<td>{summary['save_name']}</td>"
-                f"<td>{summary['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}</td>"
-                f"<td>{summary['p50']:.2f}</td>"
+        for condition, summaries in grouped_summaries.items():
+            # Add condition header
+            output_lines.append(f"<!-- wp:heading -->\n<h2>Condition: {condition}</h2>\n<!-- /wp:heading -->\n")
+            # Start table
+            header = (
+                "<!-- wp:table -->\n"
+                "<figure class=\"wp-block-table\"><table><thead><tr>"
+                "<th>Save Name</th>"
+                "<th>Timestamp</th>"
+                "<th>p50 (ms)</th>"
             )
             if include_p75:
-                line += f"<td>{summary.get('p75', 0.0):.2f}</td>"
+                header += "<th>p75 (ms)</th>"
             if include_requests:
-                line += f"<td>{summary.get('num_requests', 0)}</td>"
-            line += "</tr>"
-            output_lines.append(line)
-        output_lines.append(footer)
+                header += "<th>Number of Requests</th>"
+            header += "</tr></thead><tbody>"
+            footer = "</tbody></table></figure>\n<!-- /wp:table -->"
+            output_lines.append(header)
+            for summary in summaries:
+                line = (
+                    f"<tr><td>{summary['save_name']}</td>"
+                    f"<td>{summary['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}</td>"
+                    f"<td>{summary['p50']:.2f}</td>"
+                )
+                if include_p75:
+                    line += f"<td>{summary.get('p75', 0.0):.2f}</td>"
+                if include_requests:
+                    line += f"<td>{summary.get('num_requests', 0)}</td>"
+                line += "</tr>"
+                output_lines.append(line)
+            output_lines.append(footer)
     else:
-        header = "Condition | Save Name | Timestamp | p50 (ms)"
-        if include_p75:
-            header += " | p75 (ms)"
-        if include_requests:
-            header += " | Number of Requests"
-        separator = "-" * len(header)
-        output_lines.append(f"{header}\n{separator}")
-        for summary in summaries:
-            line = (
-                f"{summary['condition']} | "
-                f"{summary['save_name']} | "
-                f"{summary['timestamp'].strftime('%Y-%m-%d %H:%M:%S')} | "
-                f"{summary['p50']:.2f}"
-            )
+        for condition, summaries in grouped_summaries.items():
+            # Add condition header
+            output_lines.append(f"## Condition: {condition}\n")
+            # Add table header
+            header = "Save Name | Timestamp | p50 (ms)"
             if include_p75:
-                line += f" | {summary.get('p75', 0.0):.2f}"
+                header += " | p75 (ms)"
             if include_requests:
-                line += f" | {summary.get('num_requests', 0)}"
-            output_lines.append(line)
+                header += " | Number of Requests"
+            separator = "-" * len(header)
+            output_lines.append(f"{header}\n{separator}")
+            # Add table rows
+            for summary in summaries:
+                line = (
+                    f"{summary['save_name']} | "
+                    f"{summary['timestamp'].strftime('%Y-%m-%d %H:%M:%S')} | "
+                    f"{summary['p50']:.2f}"
+                )
+                if include_p75:
+                    line += f" | {summary.get('p75', 0.0):.2f}"
+                if include_requests:
+                    line += f" | {summary.get('num_requests', 0)}"
+                output_lines.append(line)
+            output_lines.append("")  # Add an empty line for spacing
 
     summary_text = "\n".join(output_lines)
     # Save summary
@@ -341,20 +352,10 @@ class TTFBToolCLI(cmd.Cmd):
     prompt = "(ttfb-tool) "
 
     def preloop(self):
-        # print("\nWhat would you like to do?")
-        # print(" - Start a new condition with 'new_condition'")
-        # print(" - Generate a summary with 'generate_summary'")
-        # print(" - Cleanup conditions with 'cleanup'")
-        # print(" - Exit the tool with 'exit'\n")
         pass
 
     def postcmd(self, stop, line):
         if not stop:
-            # print("\nWhat would you like to do next?")
-            # print(" - Start a new condition with 'new_condition'")
-            # print(" - Generate a summary with 'generate_summary'")
-            # print(" - Cleanup conditions with 'cleanup'")
-            # print(" - Exit the tool with 'exit'\n")
             pass
         return stop
 
