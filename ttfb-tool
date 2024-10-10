@@ -1,0 +1,492 @@
+#!/usr/bin/env python3
+import subprocess
+import statistics
+import argparse
+from urllib.parse import urlparse
+import re
+import random
+import string
+import json
+import datetime
+import os
+from pathlib import Path
+import sys
+import shutil
+import traceback
+import cmd
+import uuid
+
+# Constants for XDG directories
+XDG_DATA_HOME = Path(os.getenv('XDG_DATA_HOME', Path.home() / '.local' / 'share'))
+TTFB_TOOL_DATA = XDG_DATA_HOME / 'ttfb_tool'
+CONDITIONS_DIR = TTFB_TOOL_DATA / 'conditions'
+SUMMARIES_DIR = TTFB_TOOL_DATA / 'summaries'
+
+# Ensure directories exist
+CONDITIONS_DIR.mkdir(parents=True, exist_ok=True)
+SUMMARIES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def generate_random_chars(length=8):
+    return "".join(random.choices(string.ascii_lowercase + string.digits, k=length))
+
+
+def make_curl_request(url, use_dns_override, mode="ttfb"):
+    hostname = urlparse(url).hostname
+    port = urlparse(url).port or ("443" if url.startswith("https") else "80")
+    random_chars = generate_random_chars()
+    if "?" in url:
+        url += f"&defeatcache={random_chars}"
+    else:
+        url += f"?defeatcache={random_chars}"
+
+    command = [
+        "curl",
+        "-k",
+        "--ipv4",
+        "-i",
+        "-w",
+        "\\n%{http_code} %{time_starttransfer} %{time_total}",  # Output HTTP status code, TTFB and time_total
+        "-s",  # Silent mode
+    ]
+
+    if use_dns_override:
+        resolve_param = f"{hostname}:{port}:127.0.0.1"
+        command.extend(["--resolve", resolve_param])  # DNS resolution override
+
+    command.append(url)
+
+    result = subprocess.run(command, capture_output=True, text=True)
+
+    if result.returncode == 0:
+        try:
+            headers_body, metrics = result.stdout.rsplit("\n", 1)
+            http_code, time_starttransfer, time_total = metrics.split()
+            http_code = int(http_code)
+            time_starttransfer = (
+                float(time_starttransfer.strip()) * 1000
+            )  # Convert to milliseconds
+            time_total = float(time_total.strip()) * 1000  # Convert to milliseconds
+            if http_code != 200:
+                print(f"Warning: Received non-200 HTTP status code: {http_code}")
+                return None
+            if re.search("fatal error", headers_body, re.IGNORECASE):
+                print("Warning: 'Fatal Error' found in the response body or headers.")
+                return None
+            return time_total if mode == "ttlb" else time_starttransfer
+        except Exception as e:
+            print("Error parsing curl output.")
+            print(e)
+            return None
+    else:
+        print(f"Error: Command failed with return code {result.returncode}")
+        print(f"Stdout: {result.stdout}")
+        print(f"Stderr: {result.stderr}")
+        return None
+
+
+def measure_ttfb(
+    url,
+    num_requests,
+    use_dns_override,
+    mode="ttfb",
+):
+    times = []
+    data = {"url": url, "mode": mode, "metrics": {}, "requests": [], "buckets": {}}
+
+    for i in range(num_requests):
+        print(f"Making request {i + 1} of {num_requests}", end="\r")
+        time = make_curl_request(url, use_dns_override, mode)
+        if time is not None:
+            times.append(time)
+            data["requests"].append(time)
+
+    print()  # Move to next line after progress
+    if times:
+        times.sort()
+
+        data["metrics"] = {
+            "min": min(times),
+            "max": max(times),
+            "avg": sum(times) / len(times),
+            "stddev": statistics.stdev(times) if len(times) > 1 else 0.0,
+            "p50": times[int(len(times) * 0.50)],
+            "p75": times[int(len(times) * 0.75)],
+            "p90": times[int(len(times) * 0.90)],
+            "p95": times[int(len(times) * 0.95)],
+            "p99": times[int(len(times) * 0.99)],
+        }
+        # use z-score of 1.96 for 95% confidence interval, if more than 30 samples
+        n = len(times)
+        if n >= 30:
+            data["metrics"]["stderror"] = data["metrics"]["stddev"] / (n**0.5)
+            margin_of_error = 1.96 * data["metrics"]["stderror"]
+            data["metrics"]["confidence_interval_95"] = (
+                data["metrics"]["avg"] - margin_of_error,
+                data["metrics"]["avg"] + margin_of_error,
+            )
+        else:
+            data["metrics"]["confidence_interval_95"] = None
+
+        # Bucketing
+        delta = 100  # 100ms buckets
+        for ttfb in times:
+            bucket = round(int(ttfb / delta) * delta)
+            data["buckets"][str(bucket)] = data["buckets"].get(str(bucket), 0) + 1
+
+    return data
+
+
+def create_condition_directory(condition_name):
+    # Generate a unique identifier for the condition
+    condition_id = str(uuid.uuid4())
+    condition_path = CONDITIONS_DIR / condition_id
+    condition_path.mkdir(parents=True, exist_ok=True)
+
+    # Save condition metadata
+    metadata = {
+        "condition_name": condition_name,
+        "created_at": datetime.datetime.now().isoformat()
+    }
+    with open(condition_path / "metadata.json", "w") as f:
+        json.dump(metadata, f, indent=2)
+
+    return condition_id
+
+
+def get_condition_name(condition_id):
+    metadata_path = CONDITIONS_DIR / condition_id / "metadata.json"
+    if metadata_path.exists():
+        with open(metadata_path, "r") as f:
+            metadata = json.load(f)
+            return metadata.get("condition_name", "Unknown")
+    return "Unknown"
+
+
+def save_run_data(condition_id, run_name, data):
+    condition_path = CONDITIONS_DIR / condition_id
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Sanitize run_name to avoid filesystem issues
+    sanitized_run_name = re.sub(r'[^\w\-]', '_', run_name)
+    filename = f"{sanitized_run_name}_{timestamp}.json"
+    filepath = condition_path / filename
+    with open(filepath, "w") as f:
+        json.dump(data, f, indent=2)
+    print(f"Run data saved to {filepath}")
+
+
+def summarize_json_files(condition_ids, include_p75=False, include_requests=False, output_format='plain'):
+    summaries = []
+    for condition_id in condition_ids:
+        condition_path = CONDITIONS_DIR / condition_id
+        metadata = {}
+        metadata_file = condition_path / "metadata.json"
+        if metadata_file.exists():
+            with open(metadata_file, "r") as f:
+                metadata = json.load(f)
+        condition_name = metadata.get("condition_name", "Unknown")
+
+        for file in condition_path.glob("*.json"):
+            try:
+                if file == metadata_file:
+                    continue
+                with open(file, "r") as f:
+                    data = json.load(f)
+                # Extract timestamp from filename
+                # Expected filename format: runName_YYYYMMDD_HHMMSS.json
+                filename_parts = file.stem.split("_")
+                if len(filename_parts) < 3:
+                    raise ValueError("Filename does not contain enough parts for timestamp.")
+                timestamp_str = "_".join(filename_parts[-2:])
+                timestamp = datetime.datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
+
+                summary = {
+                    "condition": condition_name,
+                    "save_name": "_".join(filename_parts[:-2]),
+                    "timestamp": timestamp,
+                    "p50": data["metrics"].get("p50", 0.0),
+                }
+                if include_p75:
+                    summary["p75"] = data["metrics"].get("p75", 0.0)
+                if include_requests:
+                    summary["num_requests"] = len(data["requests"])
+                summaries.append(summary)
+            except Exception as e:
+                print(f"Error processing {file}:")
+                print(f"Exception type: {type(e).__name__}")
+                print(f"Exception message: {str(e)}")
+                print("Traceback:")
+                print(traceback.format_exc())
+                print(f"File contents:")
+                try:
+                    with open(file, "r") as f:
+                        print(f.read())
+                except:
+                    print("Could not read file.")
+                print("-" * 40)
+                print(f"Skipping {file}: not in expected format")
+
+    # Sort summaries by timestamp
+    summaries.sort(key=lambda x: x["timestamp"])
+
+    # Prepare output
+    output_lines = []
+    if output_format == 'gutenberg':
+        header = (
+            "<!-- wp:table -->\n"
+            "<figure class=\"wp-block-table\"><table><thead><tr>"
+            "<th>Condition</th>"
+            "<th>Save Name</th>"
+            "<th>Timestamp</th>"
+            "<th>p50 (ms)</th>"
+        )
+        if include_p75:
+            header += "<th>p75 (ms)</th>"
+        if include_requests:
+            header += "<th>Number of Requests</th>"
+        header += "</tr></thead><tbody>"
+        footer = "</tbody></table></figure>\n<!-- /wp:table -->"
+        output_lines.append(header)
+        for summary in summaries:
+            line = (
+                f"<tr><td>{summary['condition']}</td>"
+                f"<td>{summary['save_name']}</td>"
+                f"<td>{summary['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}</td>"
+                f"<td>{summary['p50']:.2f}</td>"
+            )
+            if include_p75:
+                line += f"<td>{summary.get('p75', 0.0):.2f}</td>"
+            if include_requests:
+                line += f"<td>{summary.get('num_requests', 0)}</td>"
+            line += "</tr>"
+            output_lines.append(line)
+        output_lines.append(footer)
+    else:
+        header = "Condition | Save Name | Timestamp | p50 (ms)"
+        if include_p75:
+            header += " | p75 (ms)"
+        if include_requests:
+            header += " | Number of Requests"
+        separator = "-" * len(header)
+        output_lines.append(f"{header}\n{separator}")
+        for summary in summaries:
+            line = (
+                f"{summary['condition']} | "
+                f"{summary['save_name']} | "
+                f"{summary['timestamp'].strftime('%Y-%m-%d %H:%M:%S')} | "
+                f"{summary['p50']:.2f}"
+            )
+            if include_p75:
+                line += f" | {summary.get('p75', 0.0):.2f}"
+            if include_requests:
+                line += f" | {summary.get('num_requests', 0)}"
+            output_lines.append(line)
+
+    summary_text = "\n".join(output_lines)
+    # Save summary
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    summary_filename = f"summary_{timestamp}.{'html' if output_format == 'gutenberg' else 'txt'}"
+    summary_filepath = SUMMARIES_DIR / summary_filename
+    with open(summary_filepath, "w") as f:
+        f.write(summary_text)
+    print(f"Summary written to {summary_filepath}")
+    print("\nGenerated Summary:\n")
+    print(summary_text)
+
+
+def cleanup_conditions():
+    conditions = [c.name for c in CONDITIONS_DIR.iterdir() if c.is_dir()]
+    if not conditions:
+        print("No conditions to clean up.")
+        return
+    print("Available conditions:")
+    condition_names = []
+    for idx, condition_id in enumerate(conditions, 1):
+        condition_name = get_condition_name(condition_id)
+        condition_names.append((condition_id, condition_name))
+        print(f"{idx}. {condition_name} (ID: {condition_id})")
+    print("Enter the numbers of conditions to delete, separated by commas (e.g., 1,3):")
+    choices = input("> ")
+    try:
+        indices = [int(x.strip()) for x in choices.split(",")]
+        to_delete = [conditions[i-1] for i in indices if 1 <= i <= len(conditions)]
+        for condition_id in to_delete:
+            condition_path = CONDITIONS_DIR / condition_id
+            shutil.rmtree(condition_path)
+            condition_name = get_condition_name(condition_id)
+            print(f"Deleted condition '{condition_name}'")
+    except Exception as e:
+        print("Invalid input. Cleanup aborted.")
+        print(e)
+
+
+def display_run_summary(run_name, data):
+    print(f"\nRun '{run_name}' completed:")
+    print(f"  p50: {data['metrics']['p50']:.2f} ms")
+    if 'p75' in data['metrics']:
+        print(f"  p75: {data['metrics']['p75']:.2f} ms")
+    print(f"  Number of Requests: {len(data['requests'])}")
+    print("-" * 30)
+
+
+class TTFBToolCLI(cmd.Cmd):
+    intro = (
+        "Welcome to the TTFB Tool Interactive CLI.\n"
+        "You can perform the following actions:\n"
+        "  - Start a new condition with 'new_condition'\n"
+        "  - Generate a summary with 'generate_summary'\n"
+        "  - Cleanup conditions with 'cleanup'\n"
+        "  - Exit the tool with 'exit'\n"
+    )
+    prompt = "(ttfb-tool) "
+
+    def preloop(self):
+        # print("\nWhat would you like to do?")
+        # print(" - Start a new condition with 'new_condition'")
+        # print(" - Generate a summary with 'generate_summary'")
+        # print(" - Cleanup conditions with 'cleanup'")
+        # print(" - Exit the tool with 'exit'\n")
+        pass
+
+    def postcmd(self, stop, line):
+        if not stop:
+            # print("\nWhat would you like to do next?")
+            # print(" - Start a new condition with 'new_condition'")
+            # print(" - Generate a summary with 'generate_summary'")
+            # print(" - Cleanup conditions with 'cleanup'")
+            # print(" - Exit the tool with 'exit'\n")
+            pass
+        return stop
+
+    def do_new_condition(self, arg):
+        """Start a new condition and perform runs.
+        Usage: new_condition
+        """
+        condition_name = input("Enter condition name: ").strip()
+        if not condition_name:
+            print("Condition name cannot be empty.")
+            return
+
+        # Create condition directory and retrieve condition_id
+        condition_id = create_condition_directory(condition_name)
+        print(f"Condition '{condition_name}' created with ID: {condition_id}")
+
+        url = input("Enter the URL to test: ").strip()
+        if not url:
+            print("URL cannot be empty.")
+            return
+        try:
+            num_requests = int(input("Enter number of requests per run: ").strip())
+            if num_requests <= 0:
+                print("Number of requests must be positive.")
+                return
+        except ValueError:
+            print("Invalid number for requests.")
+            return
+
+        use_dns_override_input = input("Use DNS override? (y/N): ").strip().lower()
+        use_dns_override = use_dns_override_input == 'y'
+
+        mode_input = input("Measurement mode ('ttfb' or 'ttlb') [ttfb]: ").strip().lower()
+        mode = mode_input if mode_input in ['ttfb', 'ttlb'] else 'ttfb'
+
+        print("\nStarting runs. To finish, press Enter without typing a run name.\n")
+        while True:
+            run_name = input("Enter run name (or press Enter to finish): ").strip()
+            if not run_name:
+                break
+            data = measure_ttfb(url, num_requests, use_dns_override, mode)
+            if data:
+                save_run_data(condition_id, run_name, data)
+                display_run_summary(run_name, data)
+            else:
+                print("Run failed. Data not saved.")
+
+        print("\nCondition completed.")
+        print("You can start a new condition with 'new_condition' or generate a summary with 'generate_summary'.")
+
+    def do_generate_summary(self, arg):
+        """Generate summaries for selected conditions.
+        Usage: generate_summary
+        """
+        conditions = [c.name for c in CONDITIONS_DIR.iterdir() if c.is_dir()]
+        if not conditions:
+            print("No conditions available for summary.")
+            return
+
+        print("Available conditions:")
+        condition_names = []
+        for idx, condition_id in enumerate(conditions, 1):
+            condition_name = get_condition_name(condition_id)
+            condition_names.append((condition_id, condition_name))
+            print(f"{idx}. {condition_name} (ID: {condition_id})")
+
+        print("Enter the numbers of conditions to include, separated by commas (e.g., 1,3):")
+        choices = input("> ")
+        try:
+            indices = [int(x.strip()) for x in choices.split(",")]
+            selected_condition_ids = [conditions[i-1] for i in indices if 1 <= i <= len(conditions)]
+            if not selected_condition_ids:
+                print("No valid conditions selected.")
+                return
+        except Exception as e:
+            print("Invalid input. Summary generation aborted.")
+            print(e)
+            return
+
+        include_p75_input = input("Include p75 metric? (y/N): ").strip().lower()
+        include_p75 = include_p75_input == 'y'
+
+        include_requests_input = input("Include number of requests? (y/N): ").strip().lower()
+        include_requests = include_requests_input == 'y'
+
+        output_format_input = input("Output in Gutenberg table format? (y/N): ").strip().lower()
+        output_format = 'gutenberg' if output_format_input == 'y' else 'plain'
+
+        summarize_json_files(
+            selected_condition_ids,
+            include_p75=include_p75,
+            include_requests=include_requests,
+            output_format=output_format
+        )
+
+        print("\nSummary generation completed.")
+        print("You can start a new condition with 'new_condition' or generate another summary with 'generate_summary'.")
+
+    def do_cleanup(self, arg):
+        """Cleanup (delete) existing conditions.
+        Usage: cleanup
+        """
+        cleanup_conditions()
+        print("\nCleanup completed.")
+        print("You can start a new condition with 'new_condition' or generate a summary with 'generate_summary'.")
+
+    def do_exit(self, arg):
+        """Exit the CLI."""
+        print("Goodbye!")
+        return True
+
+    def do_EOF(self, arg):
+        """Exit the CLI."""
+        print("Goodbye!")
+        return True
+
+    def emptyline(self):
+        pass
+
+
+def main():
+    parser = argparse.ArgumentParser(description="TTFB/TTLB Measurement Tool with Interactive Workflow.")
+    parser.add_argument('--run', action='store_true', help="Start the interactive CLI.")
+    args = parser.parse_args()
+
+    if args.run:
+        TTFBToolCLI().cmdloop()
+    else:
+        # If no arguments, start interactive CLI
+        TTFBToolCLI().cmdloop()
+
+
+if __name__ == "__main__":
+    main()
+
