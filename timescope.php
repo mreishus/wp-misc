@@ -383,7 +383,7 @@ add_action(
 
 		$request_url = isset( $_SERVER['REQUEST_URI'] ) ? esc_url_raw( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : 'CLI';
 		$log_messages = [ "AC Debug Summary for: $request_url" ];
-		$format = '%-20s | %8s | %10s | %10s | %10s | %10s | %10s';
+		$format = '%-40s | %8s | %10s | %10s | %10s | %10s | %10s';
 		$log_messages[] = sprintf( $format, 'Label', 'Count', 'Total (ms)', 'Avg (ms)', 'Median (ms)', 'Min (ms)', 'Max (ms)' );
 		$log_messages[] = str_repeat( '-', 100 );
 
@@ -394,7 +394,7 @@ add_action(
 
 				$log_messages[] = sprintf(
 					$format,
-					substr( $label, 0, 20 ),            // Truncate labels longer than 20 chars
+					substr( $label, 0, 40 ),            // Truncate labels longer than 40 chars
 					$data['count'],
 					number_format( $data['total'], 2 ), // Total
 					number_format( $avg, 2 ),           // Average
